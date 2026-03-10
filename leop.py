@@ -18,33 +18,12 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSock
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
-# ============================================================
-# SYSTEM SETUP (run once at startup)
-# ============================================================
-def setup_system():
-    """Enable universe repository and install common dependencies."""
-    try:
-        subprocess.run(
-            "apt-get update && "
-            "apt-get install -y software-properties-common && "
-            "add-apt-repository -y universe && "
-            "apt-get update && "
-            "apt-get install -y wget git python3-pip build-essential",
-            shell=True,
-            check=True,
-            capture_output=True
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"System setup warning: {e.stderr.decode()}")
-
-setup_system()
-
-# ============================================================
-# CONFIG
-# ============================================================
+# ==============================================================================
+# CONFIGURATION & SYSTEM SETUP
+# ==============================================================================
 
 APP_TITLE = "GenomeOps Workbench"
-APP_VERSION = "4.4.0"               # new version with full tool support & virus tools
+APP_VERSION = "1.1.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -61,16 +40,42 @@ APP_PASSWORD = os.getenv("APP_PASSWORD", "changeme")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
 
-app = FastAPI(title=APP_TITLE, version=APP_VERSION)
-
+# Global store for running subprocesses (job_id -> Popen)
 running_jobs: Dict[str, subprocess.Popen] = {}
 
-# ============================================================
-# TOOL CATALOG (extended with corrected install commands & new virus tools)
-# ============================================================
+app = FastAPI(title=APP_TITLE, version=APP_VERSION)
+
+# ------------------------------------------------------------------------------
+# System preparation – run once at startup
+# ------------------------------------------------------------------------------
+def setup_system():
+    """Enable universe repository and install common build tools."""
+    try:
+        subprocess.run(
+            "apt-get update && "
+            "apt-get install -y software-properties-common && "
+            "add-apt-repository -y universe && "
+            "apt-get update && "
+            "apt-get install -y wget git python3-pip build-essential",
+            shell=True,
+            check=True,
+            capture_output=True,
+            timeout=120
+        )
+        print("System setup completed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"System setup warning: {e.stderr.decode()}")
+    except Exception as e:
+        print(f"System setup exception: {e}")
+
+setup_system()
+
+# ==============================================================================
+# TOOL CATALOG (with robust install commands)
+# ==============================================================================
 
 TOOLS = {
-    # Existing tools with corrected install commands
+    # ---------- QC ----------
     "fastqc": {
         "name": "FastQC",
         "category": "QC",
@@ -104,13 +109,46 @@ TOOLS = {
              "extensions": [".fastq", ".fq", ".fastq.gz", ".fq.gz"], "help": "Forward reads"},
             {"name": "in2", "label": "Read 2 FASTQ (optional for PE)", "type": "file", "required": False,
              "extensions": [".fastq", ".fq", ".fastq.gz", ".fq.gz"], "help": "Reverse reads for paired-end"},
-            {"name": "out1", "label": "Output clean read 1", "type": "text", "default": "clean_R1.fastq.gz", "required": False},
-            {"name": "out2", "label": "Output clean read 2", "type": "text", "default": "clean_R2.fastq.gz", "required": False},
-            {"name": "threads", "label": "Threads", "type": "number", "default": 4, "required": False},
-            {"name": "qualified_quality_phred", "label": "Qualified quality (Q)", "type": "number", "default": 15, "required": False},
-            {"name": "length_required", "label": "Minimum read length", "type": "number", "default": 30, "required": False}
+            {"name": "out1", "label": "Output clean read 1", "type": "text", "default": "clean_R1.fastq.gz"},
+            {"name": "out2", "label": "Output clean read 2", "type": "text", "default": "clean_R2.fastq.gz"},
+            {"name": "threads", "label": "Threads", "type": "number", "default": 4},
+            {"name": "qualified_quality_phred", "label": "Qualified quality (Q)", "type": "number", "default": 15},
+            {"name": "length_required", "label": "Minimum read length", "type": "number", "default": 30}
         ]
     },
+    "trimmomatic": {
+        "name": "Trimmomatic",
+        "category": "QC",
+        "description": "Flexible read trimming",
+        "install_command": "apt-get update && apt-get install -y trimmomatic",
+        "version_command": "trimmomatic -version",
+        "parameters": [
+            {"name": "r1", "label": "Read 1 FASTQ", "type": "file", "required": True,
+             "extensions": [".fastq", ".fq", ".gz"], "help": "Forward reads"},
+            {"name": "r2", "label": "Read 2 FASTQ (optional for PE)", "type": "file", "required": False,
+             "extensions": [".fastq", ".fq", ".gz"], "help": "Reverse reads for paired-end"},
+            {"name": "adapter", "label": "Adapter FASTA", "type": "file", "required": False,
+             "extensions": [".fa", ".fasta"], "help": "Adapter sequences"},
+            {"name": "leading", "label": "Leading quality", "type": "number", "default": 3},
+            {"name": "trailing", "label": "Trailing quality", "type": "number", "default": 3},
+            {"name": "minlen", "label": "Minimum length", "type": "number", "default": 36}
+        ]
+    },
+    "nanoplot": {
+        "name": "NanoPlot",
+        "category": "QC",
+        "description": "QC for Nanopore reads",
+        "install_command": "pip install nanoplot",
+        "version_command": "NanoPlot --version",
+        "parameters": [
+            {"name": "reads", "label": "Nanopore FASTQ", "type": "file", "required": True,
+             "extensions": [".fastq", ".fq", ".gz"], "help": "Long reads for QC"},
+            {"name": "outdir", "label": "Output directory", "type": "text", "default": "nanoplot_out"},
+            {"name": "threads", "label": "Threads", "type": "number", "default": 4}
+        ]
+    },
+
+    # ---------- Assembly ----------
     "spades": {
         "name": "SPAdes",
         "category": "Assembly",
@@ -122,8 +160,8 @@ TOOLS = {
              "extensions": [".fastq", ".fq", ".fastq.gz", ".fq.gz"], "help": "Forward reads"},
             {"name": "r2", "label": "Read 2 (FASTQ)", "type": "file", "required": True,
              "extensions": [".fastq", ".fq", ".fastq.gz", ".fq.gz"], "help": "Reverse reads"},
-            {"name": "threads", "label": "Threads", "type": "number", "default": 4, "required": False},
-            {"name": "memory", "label": "Memory limit (GB)", "type": "number", "default": 16, "required": False}
+            {"name": "threads", "label": "Threads", "type": "number", "default": 4},
+            {"name": "memory", "label": "Memory limit (GB)", "type": "number", "default": 16}
         ]
     },
     "canu": {
@@ -138,35 +176,72 @@ TOOLS = {
             {"name": "genomeSize", "label": "Estimated genome size (e.g. 4.8m)", "type": "text", "required": True,
              "help": "e.g. 4.8m for 4.8 Mbp"},
             {"name": "useGrid", "label": "Use grid (false for local run)", "type": "flag", "default": False},
-            {"name": "maxThreads", "label": "Max threads", "type": "number", "default": 8, "required": False}
+            {"name": "maxThreads", "label": "Max threads", "type": "number", "default": 8}
         ]
     },
+    "flye": {
+        "name": "Flye",
+        "category": "Assembly",
+        "description": "Long-read assembler (viral genomes)",
+        "install_command": "pip install flye",
+        "version_command": "flye --version",
+        "parameters": [
+            {"name": "reads", "label": "Long reads FASTQ", "type": "file", "required": True,
+             "extensions": [".fastq", ".fq", ".gz"], "help": "Nanopore/PacBio reads"},
+            {"name": "genome-size", "label": "Estimated genome size", "type": "text", "required": True,
+             "help": "e.g. 5m for 5 Mbp"},
+            {"name": "threads", "label": "Threads", "type": "number", "default": 4},
+            {"name": "out-dir", "label": "Output directory", "type": "text", "default": "flye_out"}
+        ]
+    },
+    "quast": {
+        "name": "QUAST",
+        "category": "Assembly",
+        "description": "Quality assessment of genome assemblies",
+        "install_command": "apt-get update && apt-get install -y python3-pip && pip3 install quast",
+        "version_command": "quast --version",
+        "parameters": [
+            {"name": "input", "label": "Assembly FASTA", "type": "file", "required": True,
+             "extensions": [".fa", ".fasta"], "help": "Assembly to evaluate"},
+            {"name": "reference", "label": "Reference genome (optional)", "type": "file", "required": False,
+             "extensions": [".fa", ".fasta"], "help": "Reference for comparative metrics"},
+            {"name": "genes", "label": "Gene coordinates (GFF)", "type": "file", "required": False,
+             "extensions": [".gff", ".gff3"], "help": "Annotation to evaluate gene content"}
+        ]
+    },
+
+    # ---------- Annotation ----------
     "prokka": {
         "name": "Prokka",
         "category": "Annotation",
         "description": "Rapid prokaryotic genome annotation",
-        "install_command": "apt-get update && apt-get install -y software-properties-common && add-apt-repository -y universe && apt-get update && apt-get install -y prokka",
+        "install_command": "apt-get update && apt-get install -y prokka",
         "version_command": "prokka --version",
         "parameters": [
             {"name": "input", "label": "Genome FASTA", "type": "file", "required": True,
              "extensions": [".fa", ".fna", ".fasta", ".fas"], "help": "Assembly in FASTA format"},
-            {"name": "prefix", "label": "Output prefix", "type": "text", "default": "prokka", "required": False},
+            {"name": "prefix", "label": "Output prefix", "type": "text", "default": "prokka"},
             {"name": "kingdom", "label": "Kingdom", "type": "select",
-             "options": ["Bacteria", "Archaea", "Mitochondria", "Viruses"], "default": "Bacteria", "required": False},
-            {"name": "cpus", "label": "CPUs", "type": "number", "default": 4, "required": False}
+             "options": ["Bacteria", "Archaea", "Mitochondria", "Viruses"], "default": "Bacteria"},
+            {"name": "cpus", "label": "CPUs", "type": "number", "default": 4}
         ]
     },
-    "mlst": {
-        "name": "MLST",
-        "category": "Typing",
-        "description": "Multi-locus sequence typing",
-        "install_command": "apt-get update && apt-get install -y software-properties-common && add-apt-repository -y universe && apt-get update && apt-get install -y mlst",
-        "version_command": "mlst --version",
+    "prodigal": {
+        "name": "Prodigal",
+        "category": "Annotation",
+        "description": "Prokaryotic gene finding (works for viruses)",
+        "install_command": "apt-get update && apt-get install -y prodigal",
+        "version_command": "prodigal -v",
         "parameters": [
             {"name": "input", "label": "Genome FASTA", "type": "file", "required": True,
-             "extensions": [".fa", ".fna", ".fasta", ".fas"], "help": "Assembly or contigs"}
+             "extensions": [".fa", ".fasta", ".fna"], "help": "Assembly to predict genes"},
+            {"name": "output", "label": "Output GFF file", "type": "text", "default": "genes.gff"},
+            {"name": "format", "label": "Output format", "type": "select",
+             "options": ["gff", "gbk", "sqn"], "default": "gff"}
         ]
     },
+
+    # ---------- AMR / Virulence ----------
     "abricate": {
         "name": "ABRicate",
         "category": "AMR / Virulence",
@@ -177,11 +252,26 @@ TOOLS = {
             {"name": "input", "label": "Genome FASTA", "type": "file", "required": True,
              "extensions": [".fa", ".fna", ".fasta", ".fas"], "help": "Assembly to screen"},
             {"name": "db", "label": "Database", "type": "select",
-             "options": ["ncbi", "card", "argannot", "ecoh", "plasmidfinder", "vfdb"], "default": "ncbi", "required": False},
-            {"name": "minid", "label": "Minimum DNA identity (%)", "type": "number", "default": 80, "required": False},
-            {"name": "mincov", "label": "Minimum coverage (%)", "type": "number", "default": 60, "required": False}
+             "options": ["ncbi", "card", "argannot", "ecoh", "plasmidfinder", "vfdb"], "default": "ncbi"},
+            {"name": "minid", "label": "Minimum DNA identity (%)", "type": "number", "default": 80},
+            {"name": "mincov", "label": "Minimum coverage (%)", "type": "number", "default": 60}
         ]
     },
+
+    # ---------- Typing ----------
+    "mlst": {
+        "name": "MLST",
+        "category": "Typing",
+        "description": "Multi-locus sequence typing",
+        "install_command": "apt-get update && apt-get install -y mlst",
+        "version_command": "mlst --version",
+        "parameters": [
+            {"name": "input", "label": "Genome FASTA", "type": "file", "required": True,
+             "extensions": [".fa", ".fna", ".fasta", ".fas"], "help": "Assembly or contigs"}
+        ]
+    },
+
+    # ---------- Phylogeny ----------
     "iqtree": {
         "name": "IQ-TREE",
         "category": "Phylogeny",
@@ -191,11 +281,13 @@ TOOLS = {
         "parameters": [
             {"name": "input", "label": "Alignment file (PHYLIP/FASTA)", "type": "file", "required": True,
              "extensions": [".phy", ".fa", ".fasta"], "help": "Multiple sequence alignment"},
-            {"name": "model", "label": "Model", "type": "text", "default": "GTR+G", "required": False},
-            {"name": "bootstrap", "label": "Bootstrap replicates", "type": "number", "default": 1000, "required": False},
-            {"name": "threads", "label": "Threads", "type": "number", "default": 4, "required": False}
+            {"name": "model", "label": "Model", "type": "text", "default": "GTR+G"},
+            {"name": "bootstrap", "label": "Bootstrap replicates", "type": "number", "default": 1000},
+            {"name": "threads", "label": "Threads", "type": "number", "default": 4}
         ]
     },
+
+    # ---------- Alignment ----------
     "bwa": {
         "name": "BWA",
         "category": "Alignment",
@@ -209,9 +301,26 @@ TOOLS = {
              "extensions": [".fastq", ".fq", ".gz"], "help": "Forward reads"},
             {"name": "r2", "label": "Read 2 FASTQ (optional)", "type": "file", "required": False,
              "extensions": [".fastq", ".fq", ".gz"], "help": "Reverse reads for paired-end"},
-            {"name": "threads", "label": "Threads", "type": "number", "default": 4, "required": False}
+            {"name": "threads", "label": "Threads", "type": "number", "default": 4}
         ]
     },
+    "minimap2": {
+        "name": "Minimap2",
+        "category": "Alignment",
+        "description": "Long-read aligner (viral mapping)",
+        "install_command": "apt-get update && apt-get install -y minimap2",
+        "version_command": "minimap2 --version",
+        "parameters": [
+            {"name": "target", "label": "Reference genome", "type": "file", "required": True,
+             "extensions": [".fa", ".fasta", ".mmi"], "help": "Reference (or index)"},
+            {"name": "query", "label": "Reads FASTQ", "type": "file", "required": True,
+             "extensions": [".fastq", ".fq", ".gz"], "help": "Long reads to align"},
+            {"name": "out", "label": "Output SAM", "type": "text", "default": "aln.sam"},
+            {"name": "threads", "label": "Threads", "type": "number", "default": 4}
+        ]
+    },
+
+    # ---------- Utilities ----------
     "samtools": {
         "name": "samtools",
         "category": "Utilities",
@@ -266,53 +375,8 @@ TOOLS = {
              "extensions": [".fa", ".fasta", ".fq", ".fastq", ".gz"], "help": "Sequence file"}
         ]
     },
-    "trimmomatic": {
-        "name": "Trimmomatic",
-        "category": "QC",
-        "description": "Flexible read trimming",
-        "install_command": "apt-get update && apt-get install -y software-properties-common && add-apt-repository -y universe && apt-get update && apt-get install -y trimmomatic",
-        "version_command": "trimmomatic -version",
-        "parameters": [
-            {"name": "r1", "label": "Read 1 FASTQ", "type": "file", "required": True,
-             "extensions": [".fastq", ".fq", ".gz"], "help": "Forward reads"},
-            {"name": "r2", "label": "Read 2 FASTQ (optional for PE)", "type": "file", "required": False,
-             "extensions": [".fastq", ".fq", ".gz"], "help": "Reverse reads for paired-end"},
-            {"name": "adapter", "label": "Adapter FASTA", "type": "file", "required": False,
-             "extensions": [".fa", ".fasta"], "help": "Adapter sequences"},
-            {"name": "leading", "label": "Leading quality", "type": "number", "default": 3},
-            {"name": "trailing", "label": "Trailing quality", "type": "number", "default": 3},
-            {"name": "minlen", "label": "Minimum length", "type": "number", "default": 36}
-        ]
-    },
-    "quast": {
-        "name": "QUAST",
-        "category": "Assembly",
-        "description": "Quality assessment of genome assemblies",
-        "install_command": "apt-get update && apt-get install -y python3-pip && pip3 install quast",
-        "version_command": "quast --version",
-        "parameters": [
-            {"name": "input", "label": "Assembly FASTA", "type": "file", "required": True,
-             "extensions": [".fa", ".fasta"], "help": "Assembly to evaluate"},
-            {"name": "reference", "label": "Reference genome (optional)", "type": "file", "required": False,
-             "extensions": [".fa", ".fasta"], "help": "Reference for comparative metrics"},
-            {"name": "genes", "label": "Gene coordinates (GFF)", "type": "file", "required": False,
-             "extensions": [".gff", ".gff3"], "help": "Annotation to evaluate gene content"}
-        ]
-    },
-    # New virus-related tools
-    "prodigal": {
-        "name": "Prodigal",
-        "category": "Virus / Gene Prediction",
-        "description": "Prokaryotic gene finding (works for viruses)",
-        "install_command": "apt-get update && apt-get install -y prodigal",
-        "version_command": "prodigal -v",
-        "parameters": [
-            {"name": "input", "label": "Genome FASTA", "type": "file", "required": True,
-             "extensions": [".fa", ".fasta", ".fna"], "help": "Assembly to predict genes"},
-            {"name": "output", "label": "Output GFF file", "type": "text", "default": "genes.gff", "required": False},
-            {"name": "format", "label": "Output format", "type": "select", "options": ["gff", "gbk", "sqn"], "default": "gff", "required": False}
-        ]
-    },
+
+    # ---------- Virus-specific tools ----------
     "diamond": {
         "name": "DIAMOND",
         "category": "Virus / Alignment",
@@ -324,8 +388,8 @@ TOOLS = {
              "extensions": [".faa", ".fa"], "help": "Protein sequences to search"},
             {"name": "db", "label": "Database (pre-formatted .dmnd)", "type": "file", "required": True,
              "extensions": [".dmnd"], "help": "DIAMOND database file"},
-            {"name": "out", "label": "Output file", "type": "text", "default": "matches.tsv", "required": False},
-            {"name": "evalue", "label": "E-value threshold", "type": "number", "default": 0.001, "required": False}
+            {"name": "out", "label": "Output file", "type": "text", "default": "matches.tsv"},
+            {"name": "evalue", "label": "E-value threshold", "type": "number", "default": 0.001}
         ]
     },
     "hmmer": {
@@ -339,7 +403,7 @@ TOOLS = {
              "extensions": [".hmm"], "help": "Profile HMM database"},
             {"name": "seq", "label": "Protein FASTA", "type": "file", "required": True,
              "extensions": [".faa", ".fa"], "help": "Sequences to search against profile"},
-            {"name": "out", "label": "Output file", "type": "text", "default": "hits.txt", "required": False}
+            {"name": "out", "label": "Output file", "type": "text", "default": "hits.txt"}
         ]
     },
     "infernal": {
@@ -353,50 +417,7 @@ TOOLS = {
              "extensions": [".cm"], "help": "RNA family model"},
             {"name": "seq", "label": "Nucleotide FASTA", "type": "file", "required": True,
              "extensions": [".fa", ".fasta", ".fna"], "help": "Genome or contigs to search"},
-            {"name": "out", "label": "Output file", "type": "text", "default": "results.txt", "required": False}
-        ]
-    },
-    "minimap2": {
-        "name": "Minimap2",
-        "category": "Virus / Alignment",
-        "description": "Long-read aligner (viral mapping)",
-        "install_command": "apt-get update && apt-get install -y minimap2",
-        "version_command": "minimap2 --version",
-        "parameters": [
-            {"name": "target", "label": "Reference genome", "type": "file", "required": True,
-             "extensions": [".fa", ".fasta", ".mmi"], "help": "Reference (or index)"},
-            {"name": "query", "label": "Reads FASTQ", "type": "file", "required": True,
-             "extensions": [".fastq", ".fq", ".gz"], "help": "Long reads to align"},
-            {"name": "out", "label": "Output SAM", "type": "text", "default": "aln.sam", "required": False},
-            {"name": "threads", "label": "Threads", "type": "number", "default": 4, "required": False}
-        ]
-    },
-    "nanoplot": {
-        "name": "NanoPlot",
-        "category": "Virus / QC",
-        "description": "QC for Nanopore reads",
-        "install_command": "pip install nanoplot",
-        "version_command": "NanoPlot --version",
-        "parameters": [
-            {"name": "reads", "label": "Nanopore FASTQ", "type": "file", "required": True,
-             "extensions": [".fastq", ".fq", ".gz"], "help": "Long reads for QC"},
-            {"name": "outdir", "label": "Output directory", "type": "text", "default": "nanoplot_out", "required": False},
-            {"name": "threads", "label": "Threads", "type": "number", "default": 4, "required": False}
-        ]
-    },
-    "flye": {
-        "name": "Flye",
-        "category": "Virus / Assembly",
-        "description": "Long-read assembler (viral genomes)",
-        "install_command": "pip install flye",
-        "version_command": "flye --version",
-        "parameters": [
-            {"name": "reads", "label": "Long reads FASTQ", "type": "file", "required": True,
-             "extensions": [".fastq", ".fq", ".gz"], "help": "Nanopore/PacBio reads"},
-            {"name": "genome-size", "label": "Estimated genome size", "type": "text", "required": True,
-             "help": "e.g. 5m for 5 Mbp"},
-            {"name": "threads", "label": "Threads", "type": "number", "default": 4, "required": False},
-            {"name": "out-dir", "label": "Output directory", "type": "text", "default": "flye_out", "required": False}
+            {"name": "out", "label": "Output file", "type": "text", "default": "results.txt"}
         ]
     },
     "racon": {
@@ -412,14 +433,14 @@ TOOLS = {
              "extensions": [".paf"], "help": "Overlap mapping from minimap2"},
             {"name": "target", "label": "Assembly FASTA", "type": "file", "required": True,
              "extensions": [".fa", ".fasta"], "help": "Draft assembly to polish"},
-            {"name": "out", "label": "Polished assembly", "type": "text", "default": "polished.fa", "required": False}
+            {"name": "out", "label": "Polished assembly", "type": "text", "default": "polished.fa"}
         ]
     }
 }
 
-# ============================================================
-# SQLITE (unchanged except for version_command auto-migration)
-# ============================================================
+# ==============================================================================
+# DATABASE (SQLite)
+# ==============================================================================
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -429,7 +450,8 @@ def db():
 def init_db():
     conn = db()
     cur = conn.cursor()
-    # Create tables if they don't exist
+
+    # Files table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS files (
             file_id TEXT PRIMARY KEY,
@@ -441,6 +463,8 @@ def init_db():
             uploaded_at TEXT
         )
     """)
+
+    # Jobs table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             job_id TEXT PRIMARY KEY,
@@ -458,6 +482,8 @@ def init_db():
             returncode INTEGER
         )
     """)
+
+    # Tools table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tools (
             tool_key TEXT PRIMARY KEY,
@@ -471,27 +497,31 @@ def init_db():
             parameters TEXT
         )
     """)
-    # If the table already existed but lacks version_command, add it
+
+    # Add version_command column if missing (for upgrades)
     cur.execute("PRAGMA table_info(tools)")
     columns = [col[1] for col in cur.fetchall()]
     if "version_command" not in columns:
         cur.execute("ALTER TABLE tools ADD COLUMN version_command TEXT")
-    conn.commit()
 
-    # Pre-populate tools table from TOOLS dict (upsert)
+    # Upsert tools from catalog
     for key, t in TOOLS.items():
         cur.execute("""
-            INSERT OR REPLACE INTO tools (tool_key, name, category, description, install_command, version_command, parameters)
+            INSERT OR REPLACE INTO tools
+            (tool_key, name, category, description, install_command, version_command, parameters)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (key, t["name"], t["category"], t["description"], t["install_command"], t.get("version_command", ""), json.dumps(t["parameters"])))
+        """, (key, t["name"], t["category"], t["description"],
+              t["install_command"], t.get("version_command", ""),
+              json.dumps(t["parameters"])))
+
     conn.commit()
     conn.close()
 
 init_db()
 
-# ============================================================
-# HELPERS (unchanged)
-# ============================================================
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
 
 def now_str() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -500,19 +530,30 @@ def safe_name(name: str) -> str:
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
     return name or f"file_{uuid.uuid4().hex[:8]}"
 
-def run_shell(command: str, cwd: Optional[Path] = None) -> dict:
-    proc = subprocess.run(
-        command,
-        shell=True,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True
-    )
-    return {
-        "returncode": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr
-    }
+def run_shell(command: str, cwd: Optional[Path] = None, timeout: int = 300) -> dict:
+    """Run a shell command and return result dict."""
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        return {
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr
+        }
+    except subprocess.TimeoutExpired as e:
+        return {
+            "returncode": -1,
+            "stdout": e.stdout.decode() if e.stdout else "",
+            "stderr": f"Timeout after {timeout}s"
+        }
+    except Exception as e:
+        return {"returncode": 1, "stdout": "", "stderr": str(e)}
 
 def tool_status(tool_key: str) -> dict:
     conn = db()
@@ -521,16 +562,9 @@ def tool_status(tool_key: str) -> dict:
     conn.close()
     if not row:
         return {"error": "tool not found"}
-    row = dict(row)
-    return {
-        "tool_key": tool_key,
-        "name": row["name"],
-        "category": row["category"],
-        "description": row["description"],
-        "installed": bool(row["installed"]),
-        "install_job_id": row["install_job_id"],
-        "parameters": json.loads(row["parameters"])
-    }
+    d = dict(row)
+    d["parameters"] = json.loads(d["parameters"])
+    return d
 
 def all_tool_statuses() -> List[dict]:
     conn = db()
@@ -550,10 +584,8 @@ def insert_file(meta: dict):
     cur.execute("""
         INSERT INTO files (file_id, original_name, saved_name, path, extension, size_bytes, uploaded_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        meta["file_id"], meta["original_name"], meta["saved_name"], meta["path"],
-        meta["extension"], meta["size_bytes"], meta["uploaded_at"]
-    ))
+    """, (meta["file_id"], meta["original_name"], meta["saved_name"], meta["path"],
+          meta["extension"], meta["size_bytes"], meta["uploaded_at"]))
     conn.commit()
     conn.close()
 
@@ -587,10 +619,8 @@ def create_job(job_type: str, title: str, command: str = "") -> str:
             job_id, job_type, title, command, status, created_at, started_at, finished_at,
             log_file, result_dir, stdout, stderr, returncode
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        job_id, job_type, title, command, "queued", now_str(), None, None,
-        str(log_file), "", "", "", None
-    ))
+    """, (job_id, job_type, title, command, "queued", now_str(), None, None,
+          str(log_file), "", "", "", None))
     conn.commit()
     conn.close()
     return job_id
@@ -725,32 +755,15 @@ def write_json(path: Path, obj: dict):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
 
-# ============================================================
-# RESTRICTED LINUX CONSOLE (unchanged)
-# ============================================================
+# ==============================================================================
+# RESTRICTED TERMINAL
+# ==============================================================================
 
 BLOCKED_PATTERNS = [
-    r"\bsudo\b",
-    r"\bapt\b",
-    r"\bapt-get\b",
-    r"\byum\b",
-    r"\bdnf\b",
-    r"\bapk\b",
-    r"\bpacman\b",
-    r"\bcurl\b",
-    r"\bwget\b",
-    r"\bssh\b",
-    r"\bscp\b",
-    r"\brm\s+-rf\b",
-    r"\bmkfs\b",
-    r"\bmount\b",
-    r"\bumount\b",
-    r"\bshutdown\b",
-    r"\breboot\b",
-    r"\buseradd\b",
-    r"\bchmod\s+777\b",
-    r"\bchown\b",
-    r">\s*/",
+    r"\bsudo\b", r"\bapt\b", r"\bapt-get\b", r"\byum\b", r"\bdnf\b", r"\bapk\b",
+    r"\bpacman\b", r"\bcurl\b", r"\bwget\b", r"\bssh\b", r"\bscp\b", r"\brm\s+-rf\b",
+    r"\bmkfs\b", r"\bmount\b", r"\bumount\b", r"\bshutdown\b", r"\breboot\b",
+    r"\buseradd\b", r"\bchmod\s+777\b", r"\bchown\b", r">\s*/",
 ]
 
 SAFE_CD_PREFIX = str(WORKSPACE_DIR.resolve())
@@ -785,11 +798,7 @@ async def run_terminal_command(command: str, cwd: Path) -> dict:
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={
-            **os.environ,
-            "HOME": str(WORKSPACE_DIR),
-            "PWD": str(cwd),
-        }
+        env={**os.environ, "HOME": str(WORKSPACE_DIR), "PWD": str(cwd)}
     )
     stdout, stderr = await proc.communicate()
     return {
@@ -799,9 +808,9 @@ async def run_terminal_command(command: str, cwd: Path) -> dict:
         "cwd": str(cwd)
     }
 
-# ============================================================
-# REQUEST MODELS (unchanged)
-# ============================================================
+# ==============================================================================
+# REQUEST MODELS
+# ==============================================================================
 
 class PasswordPayload(BaseModel):
     password: str
@@ -824,9 +833,9 @@ class ToolRunDynamicRequest(BaseModel):
 class CancelJobRequest(BaseModel):
     password: str
 
-# ============================================================
-# ASYNC JOB RUNNERS (unchanged)
-# ============================================================
+# ==============================================================================
+# ASYNC JOB RUNNERS
+# ==============================================================================
 
 async def run_job_command(job_id: str, command: str, work_dir: Path):
     update_job(job_id, status="running", started_at=now_str(), result_dir=str(work_dir))
@@ -869,7 +878,7 @@ async def run_install_job(job_id: str, tool_key: str, install_cmd: str, version_
     work_dir = RESULT_DIR / f"install_{tool_key}_{uuid.uuid4().hex[:8]}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if tool already exists in PATH
+    # First, check if tool already exists in PATH
     check_cmd = f"which {tool_key} 2>/dev/null || echo 'not found'"
     check = run_shell(check_cmd)
     if check["returncode"] == 0 and "not found" not in check["stdout"]:
@@ -965,9 +974,9 @@ async def run_builtin_metadata_summary(job_id: str, csv_path: Path):
         status="completed"
     )
 
-# ============================================================
-# ROUTES (unchanged – the same as original)
-# ============================================================
+# ==============================================================================
+# API ROUTES
+# ==============================================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -1048,7 +1057,6 @@ async def api_file_preview(file_id: str):
     path = Path(f["path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
-    # Preview first 20 lines for text files; binary files show message
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fp:
             lines = [fp.readline() for _ in range(20)]
@@ -1160,13 +1168,11 @@ async def api_cancel_job(job_id: str, req: CancelJobRequest):
     proc = running_jobs.get(job_id)
     if not proc:
         raise HTTPException(status_code=404, detail="Running process not found")
-    # Terminate the process
     proc.terminate()
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
-    # Update job status
     update_job(job_id, status="cancelled", finished_at=now_str())
     running_jobs.pop(job_id, None)
     append_log(job_id, f"[{now_str()}] Job cancelled by user.\n")
@@ -1197,11 +1203,9 @@ async def ws_job_log(ws: WebSocket, job_id: str):
         await ws.close(code=1008, reason="Log file not found")
         return
 
-    # Send existing log
     with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
         await ws.send_text(f.read())
 
-    # Watch for changes (simple polling)
     last_size = log_path.stat().st_size
     try:
         while True:
@@ -1213,7 +1217,6 @@ async def ws_job_log(ws: WebSocket, job_id: str):
                     new_data = f.read()
                     await ws.send_text(new_data)
                 last_size = current_size
-            # If job finished, close after a while
             job = get_job(job_id)
             if job["status"] in ("completed", "failed", "cancelled"):
                 await ws.close()
@@ -1269,15 +1272,16 @@ async def ws_terminal(ws: WebSocket):
     except WebSocketDisconnect:
         return
 
-# ============================================================
-# FRONTEND (unchanged – the HTML_PAGE from the original)
-# ============================================================
+# ==============================================================================
+# FRONTEND (HTML)
+# ==============================================================================
+
 HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>GenomeOps Workbench</title>
+<title>GenomeOps Workbench v1.1</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
 <style>
 :root{
@@ -1333,8 +1337,8 @@ footer{background:#1e293b;color:#cbd5e1;padding:24px;border-radius:16px 16px 0 0
 </head>
 <body>
 <div class="header">
-  <h1><i class="fas fa-dna"></i> GenomeOps Workbench</h1>
-  <p>Dockerized Linux genomics app with installable tools, graphical forms, and a restricted workspace console.</p>
+  <h1><i class="fas fa-dna"></i> GenomeOps Workbench v1.1</h1>
+  <p>Reliable genomics tool installer with live logs and restricted terminal</p>
 </div>
 
 <div class="wrap">
@@ -1433,7 +1437,7 @@ footer{background:#1e293b;color:#cbd5e1;padding:24px;border-radius:16px 16px 0 0
         <i class="fas fa-globe"></i> <a href="https://sites.google.com/view/nahiduzzaman-bau/home" target="_blank">sites.google.com/view/nahiduzzaman-bau</a><br>
         <i class="fas fa-envelope"></i> <a href="mailto:nahiduzzaman.2001055@bau.edu.bd">nahiduzzaman.2001055@bau.edu.bd</a>
       </p>
-      <p><small>Version 4.4.0 – GenomeOps Workbench</small></p>
+      <p><small>Version 1.1.0 – GenomeOps Workbench</small></p>
     </div>
   </footer>
 </div>
@@ -1724,7 +1728,7 @@ async function cancelJob(jobId){
     loadJobs();
     if(currentJobId === jobId){
       if(jobLogSocket) jobLogSocket.close();
-      showLog(jobId); // refresh log view
+      showLog(jobId);
     }
   }catch(e){
     alert(e.message);
@@ -1757,12 +1761,10 @@ async function showLog(jobId){
   document.getElementById("jobLog").innerText = "Loading...";
   document.getElementById("liveIndicator").style.display = "inline";
   if(jobLogSocket) jobLogSocket.close();
-  // Open WebSocket for live log
   const proto = location.protocol === "https:" ? "wss" : "ws";
   jobLogSocket = new WebSocket(`${proto}://${location.host}/ws/job/${jobId}`);
   jobLogSocket.onmessage = (event) => {
     document.getElementById("jobLog").innerText += event.data;
-    // scroll to bottom
     const pre = document.getElementById("jobLog");
     pre.scrollTop = pre.scrollHeight;
   };
@@ -1835,9 +1837,9 @@ window.onload = async function(){
 </html>
 """
 
-# ============================================================
-# MAIN
-# ============================================================
+# ==============================================================================
+# ENTRY POINT
+# ==============================================================================
 
 if __name__ == "__main__":
     import uvicorn
