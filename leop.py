@@ -23,7 +23,7 @@ from pydantic import BaseModel
 # ==============================================================================
 
 APP_TITLE = "GenomeOps Workbench"
-APP_VERSION = "1.2.0"  # updated version
+APP_VERSION = "1.2.1"  # fixed Prokka and other improvements
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -215,15 +215,16 @@ TOOLS = {
         "name": "Prokka",
         "category": "Annotation",
         "description": "Rapid prokaryotic genome annotation",
-        # Fixed install command: replaces Conda version with latest from GitHub
+        # Fixed install: use a wrapper that forces system blast and avoids conda conflicts
         "install_command": (
             "apt-get update && apt-get install -y git perl bioperl ncbi-blast+ && "
             "git clone https://github.com/tseemann/prokka.git /opt/prokka && "
             "cd /opt/prokka && /opt/prokka/bin/prokka --setupdb && "
-            "ln -sf /opt/prokka/bin/prokka /usr/local/bin/ && "
-            # Backup and replace the Conda version (if it exists)
-            "mv /opt/conda/bin/prokka /opt/conda/bin/prokka.bak 2>/dev/null || true && "
-            "ln -sf /opt/prokka/bin/prokka /opt/conda/bin/prokka"
+            "rm -f /usr/local/bin/prokka && "
+            "echo '#!/bin/bash' > /usr/local/bin/prokka && "
+            "echo 'export PATH=\"/usr/bin:/bin:/usr/local/bin:$PATH\"' >> /usr/local/bin/prokka && "
+            "echo 'exec /opt/prokka/bin/prokka \"$@\"' >> /usr/local/bin/prokka && "
+            "chmod +x /usr/local/bin/prokka"
         ),
         "version_command": "prokka --version",
         "parameters": [
@@ -1461,7 +1462,7 @@ footer{background:#1e293b;color:#cbd5e1;padding:24px;border-radius:16px 16px 0 0
         <i class="fas fa-globe"></i> <a href="https://sites.google.com/view/nahiduzzaman-bau/home" target="_blank">sites.google.com/view/nahiduzzaman-bau</a><br>
         <i class="fas fa-envelope"></i> <a href="mailto:nahiduzzaman.2001055@bau.edu.bd">nahiduzzaman.2001055@bau.edu.bd</a>
       </p>
-      <p><small>Version 1.2.0 – GenomeOps Workbench</small></p>
+      <p><small>Version 1.2.1 – GenomeOps Workbench</small></p>
     </div>
   </footer>
 </div>
@@ -1799,7 +1800,7 @@ function connectTerminal(){
 
   termSocket.onopen = () => {
     termReady = true;
-    document.getElementById("termOut").textContent += "Terminal connected.\\n";
+    document.getElementById("termOut").textContent += "Terminal connected.\n";
     const password = document.getElementById("password").value;
     if(password){
       termSocket.send(JSON.stringify({type:"auth", password}));
@@ -1809,21 +1810,21 @@ function connectTerminal(){
   termSocket.onmessage = (event) => {
     const d = JSON.parse(event.data);
     if(d.type === "welcome"){
-      document.getElementById("termOut").textContent += d.message + "\\n";
+      document.getElementById("termOut").textContent += d.message + "\n";
     } else if(d.type === "auth"){
       if(d.ok){
-        document.getElementById("termOut").textContent += "Terminal authenticated.\\n";
+        document.getElementById("termOut").textContent += "Terminal authenticated.\n";
         document.getElementById("termCwd").innerText = "cwd: " + d.cwd;
       } else {
-        document.getElementById("termOut").textContent += "Authentication failed.\\n";
+        document.getElementById("termOut").textContent += "Authentication failed.\n";
       }
     } else if(d.type === "result"){
       document.getElementById("termCwd").innerText = "cwd: " + d.cwd;
-      if(d.stdout) document.getElementById("termOut").textContent += d.stdout + "\\n";
-      if(d.stderr) document.getElementById("termOut").textContent += d.stderr + "\\n";
-      document.getElementById("termOut").textContent += `[exit=${d.returncode}]\\n`;
+      if(d.stdout) document.getElementById("termOut").textContent += d.stdout + "\n";
+      if(d.stderr) document.getElementById("termOut").textContent += d.stderr + "\n";
+      document.getElementById("termOut").textContent += `[exit=${d.returncode}]\n`;
     } else if(d.type === "error"){
-      document.getElementById("termOut").textContent += d.error + "\\n";
+      document.getElementById("termOut").textContent += d.error + "\n";
     }
     const pre = document.getElementById("termOut");
     pre.scrollTop = pre.scrollHeight;
@@ -1831,7 +1832,7 @@ function connectTerminal(){
 
   termSocket.onclose = () => {
     termReady = false;
-    document.getElementById("termOut").textContent += "Terminal disconnected.\\n";
+    document.getElementById("termOut").textContent += "Terminal disconnected.\n";
   };
 }
 
@@ -1844,7 +1845,7 @@ function termRun(){
         const cmd = document.getElementById("termCmd").value.trim();
         if(!cmd) return;
         termSocket.send(JSON.stringify({type:"run", command:cmd}));
-        document.getElementById("termOut").textContent += `$ ${cmd}\\n`;
+        document.getElementById("termOut").textContent += `$ ${cmd}\n`;
         document.getElementById("termCmd").value = "";
       } else {
         alert("Terminal not connected. Try again.");
@@ -1855,7 +1856,7 @@ function termRun(){
   const cmd = document.getElementById("termCmd").value.trim();
   if(!cmd) return;
   termSocket.send(JSON.stringify({type:"run", command:cmd}));
-  document.getElementById("termOut").textContent += `$ ${cmd}\\n`;
+  document.getElementById("termOut").textContent += `$ ${cmd}\n`;
   document.getElementById("termCmd").value = "";
 }
 
