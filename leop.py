@@ -23,7 +23,7 @@ from pydantic import BaseModel
 # ==============================================================================
 
 APP_TITLE = "GenomeOps Workbench"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"  # updated version
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -212,17 +212,21 @@ TOOLS = {
 
     # ---------- Annotation ----------
     "prokka": {
-    "name": "Prokka",
-    "category": "Annotation",
-    "description": "Rapid prokaryotic genome annotation",
-    "install_command": (
-        "apt-get update && apt-get install -y git perl bioperl ncbi-blast+ && "
-        "git clone https://github.com/tseemann/prokka.git /opt/prokka && "
-        "cd /opt/prokka && /opt/prokka/bin/prokka --setupdb && "
-        "ln -sf /opt/prokka/bin/prokka /usr/local/bin/"
-    ),
-    "version_command": "prokka --version",
-    "parameters": [
+        "name": "Prokka",
+        "category": "Annotation",
+        "description": "Rapid prokaryotic genome annotation",
+        # Fixed install command: replaces Conda version with latest from GitHub
+        "install_command": (
+            "apt-get update && apt-get install -y git perl bioperl ncbi-blast+ && "
+            "git clone https://github.com/tseemann/prokka.git /opt/prokka && "
+            "cd /opt/prokka && /opt/prokka/bin/prokka --setupdb && "
+            "ln -sf /opt/prokka/bin/prokka /usr/local/bin/ && "
+            # Backup and replace the Conda version (if it exists)
+            "mv /opt/conda/bin/prokka /opt/conda/bin/prokka.bak 2>/dev/null || true && "
+            "ln -sf /opt/prokka/bin/prokka /opt/conda/bin/prokka"
+        ),
+        "version_command": "prokka --version",
+        "parameters": [
             {"name": "input", "label": "Genome FASTA", "type": "file", "required": True,
              "extensions": [".fa", ".fna", ".fasta", ".fas"], "help": "Assembly in FASTA format"},
             {"name": "prefix", "label": "Output prefix", "type": "text", "default": "prokka"},
@@ -829,6 +833,7 @@ class MetadataSummaryRequest(BaseModel):
 class ToolInstallRequest(BaseModel):
     password: str
     tool_key: str
+    force: bool = False   # allow reinstall
 
 class ToolRunDynamicRequest(BaseModel):
     password: str
@@ -1013,18 +1018,32 @@ async def api_install_tool(payload: ToolInstallRequest):
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Tool not found")
-    if row["installed"]:
+
+    # If not forcing and already installed, return early
+    if not payload.force and row["installed"]:
         conn.close()
         return {"message": "Tool already installed", "installed": True}
-    if row["install_job_id"]:
+
+    # If there's an ongoing installation job, reuse it (unless forcing)
+    if not payload.force and row["install_job_id"]:
         job = get_job(row["install_job_id"])
         if job and job["status"] in ("queued", "running"):
             conn.close()
             return {"message": "Installation already in progress", "job_id": row["install_job_id"]}
+
+    # Create a new job
     job_id = create_job("install", f"Install {payload.tool_key}", row["install_command"])
     cur.execute("UPDATE tools SET install_job_id = ? WHERE tool_key = ?", (job_id, payload.tool_key))
     conn.commit()
     conn.close()
+
+    # Reset installed flag to 0 while installing
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE tools SET installed = 0 WHERE tool_key = ?", (payload.tool_key,))
+    conn.commit()
+    conn.close()
+
     asyncio.create_task(run_install_job(job_id, payload.tool_key, row["install_command"], row["version_command"] or ""))
     return {"job_id": job_id}
 
@@ -1278,7 +1297,7 @@ async def ws_terminal(ws: WebSocket):
         return
 
 # ==============================================================================
-# FRONTEND (HTML)
+# FRONTEND (HTML) – Enhanced version
 # ==============================================================================
 
 HTML_PAGE = """
@@ -1286,7 +1305,7 @@ HTML_PAGE = """
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>GenomeOps Workbench v1.1</title>
+<title>GenomeOps Workbench v1.2</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
 <style>
 :root{
@@ -1342,8 +1361,8 @@ footer{background:#1e293b;color:#cbd5e1;padding:24px;border-radius:16px 16px 0 0
 </head>
 <body>
 <div class="header">
-  <h1><i class="fas fa-dna"></i> GenomeOps Workbench v1.1</h1>
-  <p>Reliable genomics tool installer with live logs and restricted terminal</p>
+  <h1><i class="fas fa-dna"></i> GenomeOps Workbench v1.2</h1>
+  <p>Enhanced – with force‑reinstall, fixed terminal, and Prokka fix</p>
 </div>
 
 <div class="wrap">
@@ -1400,7 +1419,7 @@ footer{background:#1e293b;color:#cbd5e1;padding:24px;border-radius:16px 16px 0 0
         <h2>6. Install & run external tools</h2>
         <select id="toolSelect" onchange="onToolSelect()"></select>
         <div id="toolInstallStatus" class="small"></div>
-        <button class="green" id="installBtn" onclick="installTool()" style="display:none;"><i class="fas fa-download"></i> Install tool</button>
+        <button class="green" id="installBtn" onclick="installToolDirect(selectedTool.tool_key, true)" style="display:none;"><i class="fas fa-download"></i> Install / Reinstall</button>
         <div id="toolFormContainer" style="margin-top:12px;"></div>
         <button class="green" id="runToolBtn" onclick="runDynamicTool()" style="display:none;"><i class="fas fa-play"></i> Run tool</button>
         <div id="toolRunMsg" class="small"></div>
@@ -1442,7 +1461,7 @@ footer{background:#1e293b;color:#cbd5e1;padding:24px;border-radius:16px 16px 0 0
         <i class="fas fa-globe"></i> <a href="https://sites.google.com/view/nahiduzzaman-bau/home" target="_blank">sites.google.com/view/nahiduzzaman-bau</a><br>
         <i class="fas fa-envelope"></i> <a href="mailto:nahiduzzaman.2001055@bau.edu.bd">nahiduzzaman.2001055@bau.edu.bd</a>
       </p>
-      <p><small>Version 1.1.0 – GenomeOps Workbench</small></p>
+      <p><small>Version 1.2.0 – GenomeOps Workbench</small></p>
     </div>
   </footer>
 </div>
@@ -1516,7 +1535,7 @@ function filterTools(){
           <td><b>${t.name}</b></td>
           <td>${t.description}</td>
           <td class="${t.installed ? 'ok' : 'bad'}">${t.installed ? 'Installed' : 'Not installed'}</td>
-          <td>${t.installed ? '' : `<button class="gray" onclick="installToolDirect('${t.tool_key}')"><i class="fas fa-download"></i> Install</button>`}</td>
+          <td>${t.installed ? '' : `<button class="gray" onclick="installToolDirect('${t.tool_key}', true)"><i class="fas fa-download"></i> Install</button>`}</td>
         </tr>
       `;
     }
@@ -1542,11 +1561,11 @@ async function loadTools(){
 
 document.getElementById("toolSearch").addEventListener("input", filterTools);
 
-async function installToolDirect(toolKey){
+async function installToolDirect(toolKey, force = false){
   if(!APP_OK){ alert("Unlock protected actions first."); return; }
   const password = document.getElementById("password").value;
   try{
-    const d = await api("/api/tools/install", "POST", {password, tool_key: toolKey});
+    const d = await api("/api/tools/install", "POST", {password, tool_key: toolKey, force});
     if(d.job_id){
       alert(`Installation started. Job ID: ${d.job_id}`);
       loadJobs();
@@ -1565,7 +1584,7 @@ async function onToolSelect(){
   selectedTool = tools.find(t => t.tool_key === key);
   if(!selectedTool) return;
   document.getElementById("toolInstallStatus").innerText = selectedTool.installed ? "Installed" : "Not installed";
-  document.getElementById("installBtn").style.display = selectedTool.installed ? "none" : "inline-block";
+  document.getElementById("installBtn").style.display = "inline-block"; // always show for reinstall
   if(selectedTool.installed){
     renderToolForm(selectedTool);
     document.getElementById("runToolBtn").style.display = "inline-block";
@@ -1573,11 +1592,6 @@ async function onToolSelect(){
     document.getElementById("toolFormContainer").innerHTML = "";
     document.getElementById("runToolBtn").style.display = "none";
   }
-}
-
-async function installTool(){
-  if(!selectedTool) return;
-  await installToolDirect(selectedTool.tool_key);
 }
 
 function renderToolForm(tool){
@@ -1779,7 +1793,7 @@ async function showLog(jobId){
 }
 
 function connectTerminal(){
-  if(termSocket){ termSocket.close(); }
+  if(termSocket && termSocket.readyState === WebSocket.OPEN) return;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   termSocket = new WebSocket(`${proto}://${location.host}/ws/terminal`);
 
@@ -1822,7 +1836,22 @@ function connectTerminal(){
 }
 
 function termRun(){
-  if(!termReady){ connectTerminal(); }
+  if(!termReady || !termSocket || termSocket.readyState !== WebSocket.OPEN){
+    connectTerminal();
+    // Wait a moment for connection
+    setTimeout(() => {
+      if(termSocket && termSocket.readyState === WebSocket.OPEN){
+        const cmd = document.getElementById("termCmd").value.trim();
+        if(!cmd) return;
+        termSocket.send(JSON.stringify({type:"run", command:cmd}));
+        document.getElementById("termOut").textContent += `$ ${cmd}\\n`;
+        document.getElementById("termCmd").value = "";
+      } else {
+        alert("Terminal not connected. Try again.");
+      }
+    }, 500);
+    return;
+  }
   const cmd = document.getElementById("termCmd").value.trim();
   if(!cmd) return;
   termSocket.send(JSON.stringify({type:"run", command:cmd}));
